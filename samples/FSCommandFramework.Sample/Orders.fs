@@ -89,6 +89,8 @@ module OrderSummariesReactions =
     let private jsonOptions =
         JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase)
 
+    let private Ignore(t: Task<_>) = (t :> Task)
+
     let all: EventReaction list =
         [ EventReaction.on<OrderEvent> (fun e tx ->
               task {
@@ -96,34 +98,28 @@ module OrderSummariesReactions =
 
                   match e with
                   | OrderPlaced(orderId, customerId, items) ->
-                      let! _ =
-                          conn.ExecuteAsync(
+                      do! conn.ExecuteAsync(
                               "INSERT INTO order_summaries (order_id, customer_id, status, items, placed_at, updated_at) VALUES (@orderId, @customerId, 'placed', @items::jsonb, @now, @now) ON CONFLICT (order_id) DO NOTHING",
                               {| orderId = orderId
                                  customerId = customerId
                                  items = JsonSerializer.Serialize(items, jsonOptions)
                                  now = DateTimeOffset.UtcNow |},
                               tx
-                          )
-                      ()
+                            ) |> Ignore
 
                   | OrderCancelled(orderId, _) ->
-                      let! _ =
-                          conn.ExecuteAsync(
+                      do! conn.ExecuteAsync(
                               "UPDATE order_summaries SET status = 'cancelled', updated_at = @now WHERE order_id = @orderId",
                               {| orderId = orderId
                                  now = DateTimeOffset.UtcNow |},
                               tx
-                          )
-                      ()
+                          ) |> Ignore
 
                   | OrderShipped(orderId, _) ->
-                      let! _ =
-                          conn.ExecuteAsync(
+                      do! conn.ExecuteAsync(
                               "UPDATE order_summaries SET status = 'shipped', updated_at = @now WHERE order_id = @orderId",
                               {| orderId = orderId
                                  now = DateTimeOffset.UtcNow |},
                               tx
-                          )
-                      ()
+                          ) |> Ignore
               }) ]

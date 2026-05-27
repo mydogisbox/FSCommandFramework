@@ -26,10 +26,11 @@ module Helpers =
     let expectOk result =
         Result.defaultWith (fun e -> failwith $"Expected Ok but got Error: {e}") result
 
-    let expectError result =
-        match result with
+    let expectError = function
         | Error e -> e
         | Ok _ -> failwith "Expected Error but got Ok"
+
+    let Ignore(t: Task<_>) = (t :> Task)
 
 open Helpers
 
@@ -40,8 +41,7 @@ type CounterTests() =
 
     let db = TestDatabase()
 
-    let mutable handler: AggregateHandler<CounterState, CounterEvent, CounterCommand> =
-        Unchecked.defaultof<_>
+    let mutable handler: AggregateHandler<_,_,_> = Unchecked.defaultof<_>
 
     interface IAsyncLifetime with
         member _.InitializeAsync() =
@@ -49,7 +49,7 @@ type CounterTests() =
                 do! (db :> IAsyncLifetime).InitializeAsync()
 
                 handler <-
-                    AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                    AggregateHandler(
                         CounterAggregate.definition,
                         PostgresEventStore db.ConnectionString,
                         "counters"
@@ -86,14 +86,11 @@ type CounterTests() =
             let store = PostgresEventStore db.ConnectionString
             let! stored = (store :> IEventStore).LoadAsync($"counters/{aggregateId}")
 
-            if List.isEmpty stored then
-                return None
-            else
-                return
-                    Aggregate.fold
-                        (stored
-                         |> Seq.map (fun e -> CounterAggregate.deserializeEvent e.EventType e.Payload))
-                        CounterAggregate.apply
+            return
+                Aggregate.fold
+                    (stored
+                        |> Seq.map (fun e -> CounterAggregate.deserializeEvent e.EventType e.Payload))
+                    CounterAggregate.apply
         }
 
     [<Fact>]
@@ -234,8 +231,7 @@ type EventProcessorTests() =
                               | CounterIncremented by ->
                                   let conn = (tx :?> NpgsqlTransaction).Connection
 
-                                  let! _ =
-                                      conn.ExecuteAsync(
+                                  do! conn.ExecuteAsync(
                                           "INSERT INTO outbox (stream_id, event_type, payload, created_at) VALUES (@streamId, @eventType, @payload::jsonb, @createdAt)",
                                           {| streamId = streamId
                                              eventType = "CounterIncremented"
@@ -248,14 +244,12 @@ type EventProcessorTests() =
                                               )
                                              createdAt = DateTimeOffset.UtcNow |},
                                           tx
-                                      )
-
-                                  ()
+                                      ) |> Ignore
                               | _ -> ()
                           }) ]
 
             let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                AggregateHandler(
                     CounterAggregate.definition,
                     PostgresEventStore db.ConnectionString,
                     "counters",
@@ -289,8 +283,7 @@ type EventProcessorTests() =
     [<Fact>]
     member _.``Sync reaction rolls back with failed append``() =
         task {
-            let store = PostgresEventStore db.ConnectionString
-            let eventStore = store :> IEventStore
+            let eventStore = PostgresEventStore db.ConnectionString :> IEventStore
             let aggregateId = Guid.NewGuid().ToString()
             let streamId = $"counters/{aggregateId}"
 
@@ -302,8 +295,7 @@ type EventProcessorTests() =
                               | CounterIncremented by ->
                                   let conn = (tx :?> NpgsqlTransaction).Connection
 
-                                  let! _ =
-                                      conn.ExecuteAsync(
+                                  do! conn.ExecuteAsync(
                                           "INSERT INTO outbox (stream_id, event_type, payload, created_at) VALUES (@streamId, @eventType, @payload::jsonb, @createdAt)",
                                           {| streamId = streamId
                                              eventType = "CounterIncremented"
@@ -316,9 +308,7 @@ type EventProcessorTests() =
                                               )
                                              createdAt = DateTimeOffset.UtcNow |},
                                           tx
-                                      )
-
-                                  ()
+                                      ) |> Ignore
                               | _ -> ()
                           }) ]
 
@@ -355,8 +345,7 @@ type EdgeCaseTests() =
     let db = TestDatabase()
 
     interface IAsyncLifetime with
-        member _.InitializeAsync() =
-            (db :> IAsyncLifetime).InitializeAsync()
+        member _.InitializeAsync() = (db :> IAsyncLifetime).InitializeAsync()
 
         member _.DisposeAsync() = task { () }
 
@@ -365,12 +354,10 @@ type EdgeCaseTests() =
         task {
             let processor =
                 EventProcessor
-                    [ EventReaction.on<CounterEvent> (fun _ _ ->
-                          raise (InvalidOperationException "reaction failed")
-                          Task.FromResult()) ]
+                    [ EventReaction.on<CounterEvent> (fun _ _ -> raise (InvalidOperationException "reaction failed")) ]
 
             let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                AggregateHandler(
                     CounterAggregate.definition,
                     PostgresEventStore db.ConnectionString,
                     "counters",
@@ -390,22 +377,21 @@ type EdgeCaseTests() =
                         CounterAggregate.deserializeEvent
                     ))
 
-            let store = PostgresEventStore db.ConnectionString
-            let! stored = (store :> IEventStore).LoadAsync $"counters/{aggregateId}"
+            let store = PostgresEventStore db.ConnectionString :> IEventStore
+            let! stored = store.LoadAsync $"counters/{aggregateId}"
             Assert.Empty stored
         }
 
     [<Fact>]
     member _.``Appending zero events is a noop``() =
         task {
-            let store = PostgresEventStore db.ConnectionString
-            let eventStore = store :> IEventStore
+            let store = PostgresEventStore db.ConnectionString :> IEventStore
             let streamId = $"counters/{Guid.NewGuid()}"
 
-            let! result = eventStore.AppendAsync(streamId, -1, [], None, None)
+            let! result = store.AppendAsync(streamId, -1, [], None, None)
             Assert.Empty(expectOk result)
 
-            let! stored = eventStore.LoadAsync streamId
+            let! stored = store.LoadAsync streamId
             Assert.Empty stored
         }
 
@@ -413,7 +399,7 @@ type EdgeCaseTests() =
     member _.``Unknown command type throws and nothing is written``() =
         task {
             let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                AggregateHandler(
                     CounterAggregate.definition,
                     PostgresEventStore db.ConnectionString,
                     "counters"
@@ -426,10 +412,8 @@ type EdgeCaseTests() =
                     handler.ExecuteAsync(
                         { AggregateId = aggregateId
                           Commands =
-                            [| { Type = "Increment"
-                                 Payload = json {| by = 1 |} }
-                               { Type = "UnknownCommand"
-                                 Payload = json {| |} } |] },
+                            [| { Type = "Increment";      Payload = json {| by = 1 |} }
+                               { Type = "UnknownCommand"; Payload = json {| |} } |] },
                         CounterAggregate.deserializeCommand,
                         CounterAggregate.deserializeEvent
                     ))
@@ -443,7 +427,7 @@ type EdgeCaseTests() =
     member _.``Malformed payload mid batch nothing is written``() =
         task {
             let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                AggregateHandler(
                     CounterAggregate.definition,
                     PostgresEventStore db.ConnectionString,
                     "counters"
@@ -456,10 +440,8 @@ type EdgeCaseTests() =
                     handler.ExecuteAsync(
                         { AggregateId = aggregateId
                           Commands =
-                            [| { Type = "Increment"
-                                 Payload = json {| by = 1 |} }
-                               { Type = "Decrement"
-                                 Payload = JsonSerializer.SerializeToElement "not-an-object" } |] },
+                            [| { Type = "Increment"; Payload = json {| by = 1 |} }
+                               { Type = "Decrement"; Payload = JsonSerializer.SerializeToElement "not-an-object" } |] },
                         CounterAggregate.deserializeCommand,
                         CounterAggregate.deserializeEvent
                     ))
@@ -473,7 +455,7 @@ type EdgeCaseTests() =
     member _.``Intra-batch conflict nothing is written``() =
         task {
             let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                AggregateHandler(
                     CounterAggregate.definition,
                     PostgresEventStore db.ConnectionString,
                     "counters"
@@ -485,10 +467,8 @@ type EdgeCaseTests() =
                 handler.ExecuteAsync(
                     { AggregateId = aggregateId
                       Commands =
-                        [| { Type = "Increment"
-                             Payload = json {| by = 5 |} }
-                           { Type = "Decrement"
-                             Payload = json {| by = 0 |} } |] },
+                        [| { Type = "Increment"; Payload = json {| by = 5 |} }
+                           { Type = "Decrement"; Payload = json {| by = 0 |} } |] },
                     CounterAggregate.deserializeCommand,
                     CounterAggregate.deserializeEvent
                 )
@@ -503,8 +483,7 @@ type EdgeCaseTests() =
     [<Fact>]
     member _.``Concurrent appends to same stream one succeeds one fails``() =
         task {
-            let store = PostgresEventStore db.ConnectionString
-            let eventStore = store :> IEventStore
+            let eventStore = PostgresEventStore db.ConnectionString :> IEventStore
             let streamId = $"counters/{Guid.NewGuid()}"
 
             let task1 =
@@ -534,22 +513,20 @@ type EdgeCaseTests() =
                               | CounterIncremented by ->
                                   let npgsqlTx = tx :?> NpgsqlTransaction
 
-                                  let! _ =
-                                      npgsqlTx.Connection.ExecuteAsync(
+                                  do! npgsqlTx.Connection.ExecuteAsync(
                                           "INSERT INTO events (stream_id, sequence, event_type, payload, occurred_at) VALUES (@streamId, 0, @eventType, @payload::jsonb, @occurredAt)",
                                           {| streamId = streamBId
                                              eventType = "CounterIncremented"
                                              payload = $"""{{"by":{by}}}"""
                                              occurredAt = DateTimeOffset.UtcNow |},
                                           npgsqlTx
-                                      )
-
+                                      ) |> Ignore
                                   ()
                               | _ -> ()
                           }) ]
 
             let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                AggregateHandler(
                     CounterAggregate.definition,
                     PostgresEventStore db.ConnectionString,
                     "counters",
@@ -570,8 +547,7 @@ type EdgeCaseTests() =
 
             expectOk result |> ignore
 
-            let store = PostgresEventStore db.ConnectionString
-            let eventStore = store :> IEventStore
+            let eventStore = PostgresEventStore db.ConnectionString :> IEventStore
             let! streamAEvents = eventStore.LoadAsync $"counters/{aggregateIdA}"
             let! streamBEvents = eventStore.LoadAsync streamBId
 
@@ -602,12 +578,12 @@ type EdgeCaseTests() =
                                           npgsqlTx
                                       )
 
-                                  raise (InvalidOperationException("downstream write failed"))
+                                  raise (InvalidOperationException "downstream write failed")
                               | _ -> ()
                           }) ]
 
             let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                AggregateHandler(
                     CounterAggregate.definition,
                     PostgresEventStore db.ConnectionString,
                     "counters",
@@ -627,8 +603,7 @@ type EdgeCaseTests() =
                         CounterAggregate.deserializeEvent
                     ))
 
-            let store = PostgresEventStore db.ConnectionString
-            let eventStore = store :> IEventStore
+            let eventStore = PostgresEventStore db.ConnectionString :> IEventStore
             let! streamAEvents = eventStore.LoadAsync($"counters/{aggregateIdA}")
             let! streamBEvents = eventStore.LoadAsync(streamBId)
 
@@ -656,9 +631,11 @@ type HttpLayerTests() =
             builder.WebHost.UseTestServer() |> ignore
 
             let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(
+                AggregateHandler(
                     CounterAggregate.definition,
-                    StubEventStore(),
+                    { new IEventStore with
+                        member _.AppendAsync(_, _, _, _, _) = raise (NotImplementedException())
+                        member _.LoadAsync _ = raise (NotImplementedException()) },
                     "counters"
                 )
 
@@ -696,21 +673,18 @@ type HttpLayerTests() =
             let eventStore = store :> IEventStore
             let! _ = eventStore.AppendAsync(streamId, -1, [ ("CounterIncremented", """{"by":1}""") ], None, None)
 
-            let nullDefinition: AggregateDefinition<CounterState, CounterEvent, CounterCommand> =
+            let nullDefinition =
                 { Dispatch = CounterAggregate.dispatch
                   Apply = fun _ _ -> Unchecked.defaultof<CounterState> }
 
             let builder = WebApplication.CreateBuilder()
             builder.WebHost.UseTestServer() |> ignore
 
-            let handler =
-                AggregateHandler<CounterState, CounterEvent, CounterCommand>(nullDefinition, store, "nullcounters")
-
             let app = builder.Build()
 
             app.MapAggregate(
                 "nullcounters",
-                handler,
+                AggregateHandler(nullDefinition, store, "nullcounters"),
                 CounterAggregate.deserializeCommand,
                 CounterAggregate.deserializeEvent
             )
@@ -724,12 +698,6 @@ type HttpLayerTests() =
             Assert.Equal(HttpStatusCode.NotFound, response.StatusCode)
             do! app.StopAsync()
         }
-
-and StubEventStore() =
-
-    interface IEventStore with
-        member _.AppendAsync(_, _, _, _, _) = raise (NotImplementedException())
-        member _.LoadAsync(_) = raise (NotImplementedException())
 
 // ── Read Model Tests ─────────────────────────────────────────────────────────
 
@@ -747,9 +715,6 @@ type ReadModelTests() =
     [<Fact>]
     member _.``Concurrent commands each produce one read model entry``() =
         task {
-            let count = 20
-            let store = PostgresEventStore db.ConnectionString
-
             let processor =
                 EventProcessor
                     [ EventReaction.on<CounterEvent> (fun e tx ->
@@ -758,31 +723,27 @@ type ReadModelTests() =
                               | CounterIncremented by ->
                                   let npgsqlTx = tx :?> NpgsqlTransaction
 
-                                  let! _ =
-                                      npgsqlTx.Connection.ExecuteAsync(
+                                  do! npgsqlTx.Connection.ExecuteAsync(
                                           "INSERT INTO outbox (stream_id, event_type, payload, created_at) VALUES (@streamId, @eventType, @payload::jsonb, @createdAt)",
                                           {| streamId = Guid.NewGuid().ToString()
                                              eventType = "CounterIncremented"
                                              payload = $"""{{"by":{by}}}"""
                                              createdAt = DateTimeOffset.UtcNow |},
                                           npgsqlTx
-                                      )
-
-                                  ()
+                                      ) |> Ignore
                               | _ -> ()
                           }) ]
 
             let handler =
                 AggregateHandler<CounterState, CounterEvent, CounterCommand>(
                     CounterAggregate.definition,
-                    store,
+                    PostgresEventStore db.ConnectionString,
                     "counters",
                     processor
                 )
 
             let tasks =
-                [ 0 .. count - 1 ]
-                |> List.map (fun _ ->
+                [ for _ in  0 .. 20 - 1 ->
                     handler.ExecuteAsync(
                         { AggregateId = null
                           Commands =
@@ -790,7 +751,7 @@ type ReadModelTests() =
                                  Payload = json {| by = 1 |} } |] },
                         CounterAggregate.deserializeCommand,
                         CounterAggregate.deserializeEvent
-                    ))
+                    )]
 
             let! results = Task.WhenAll tasks
             results |> Array.iter (expectOk >> ignore)
@@ -798,5 +759,5 @@ type ReadModelTests() =
             use conn = new NpgsqlConnection(db.ConnectionString)
             do! conn.OpenAsync()
             let! entryCount = conn.ExecuteScalarAsync<int> "SELECT COUNT(*) FROM outbox"
-            Assert.Equal(count, entryCount)
+            Assert.Equal(20, entryCount)
         }

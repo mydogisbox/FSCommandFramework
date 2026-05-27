@@ -6,11 +6,11 @@ open System.Threading.Tasks
 
 type EventReaction =
     { EventType: Type
-      Handle: obj -> IDbTransaction -> Task<unit> }
+      Handle: obj -> IDbTransaction -> Task }
 
 module EventReaction =
 
-    let on<'Event> (handle: 'Event -> IDbTransaction -> Task<unit>) : EventReaction =
+    let on<'Event> (handle: 'Event -> IDbTransaction -> Task) : EventReaction =
         { EventType = typeof<'Event>
           Handle = fun e tx -> handle (unbox<'Event> e) tx }
 
