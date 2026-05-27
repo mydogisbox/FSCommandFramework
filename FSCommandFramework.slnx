@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/FSCommandFramework.Sample/FSCommandFramework.Sample.fsproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/FSCommandFramework.Core/FSCommandFramework.Core.fsproj" />
+    <Project Path="src/FSCommandFramework.Http/FSCommandFramework.Http.fsproj" />
+    <Project Path="src/FSCommandFramework.Postgres/FSCommandFramework.Postgres.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FSCommandFramework.Tests/FSCommandFramework.Tests.fsproj" />
+  </Folder>
+</Solution>
