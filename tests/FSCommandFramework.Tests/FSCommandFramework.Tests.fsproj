@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="CounterAggregate.fs" />
+    <Compile Include="OrderAggregate.fs" />
     <Compile Include="TestDatabase.fs" />
     <Compile Include="Tests.fs" />
   </ItemGroup>

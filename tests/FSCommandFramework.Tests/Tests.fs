@@ -753,6 +753,358 @@ type ConcurrencyTests() =
             Assert.Equal(0, stored.[0].Sequence)
         }
 
+// ── Order Dispatch Tests ─────────────────────────────────────────────────────
+
+type OrderDispatchTests() =
+
+    let db = TestDatabase()
+
+    let handler =
+        AggregateHandler(
+            OrderAggregate.definition,
+            PostgresEventStore db.ConnectionString,
+            "orders"
+        )
+
+    member private _.ExecuteAsync(aggregateId, commands) =
+        handler.ExecuteAsync(
+            { AggregateId = aggregateId; Commands = commands },
+            OrderAggregate.deserializeCommand,
+            OrderAggregate.deserializeEvent
+        )
+
+    member private this.PlaceOrderAsync() =
+        task {
+            let aggregateId = Guid.NewGuid().ToString()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "PlaceOrder"
+                         Payload = json {| customerId = "cust-1"; items = [| "widget" |] |} } |]
+                )
+            expectOk result |> ignore
+            return aggregateId
+        }
+
+    member private this.PlaceThenCancelAsync() =
+        task {
+            let! aggregateId = this.PlaceOrderAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "CancelOrder"
+                         Payload = json {| aggregateId = aggregateId; reason = "changed mind" |} } |]
+                )
+            expectOk result |> ignore
+            return aggregateId
+        }
+
+    member private this.PlaceThenShipAsync() =
+        task {
+            let! aggregateId = this.PlaceOrderAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "ShipOrder"
+                         Payload = json {| aggregateId = aggregateId; trackingNumber = "TRACK-123" |} } |]
+                )
+            expectOk result |> ignore
+            return aggregateId
+        }
+
+    [<Fact>]
+    member this.``PlaceOrder succeeds with valid customer and items``() =
+        task {
+            let! result =
+                this.ExecuteAsync(
+                    null,
+                    [| { Type = "PlaceOrder"
+                         Payload = json {| customerId = "cust-1"; items = [| "widget" |] |} } |]
+                )
+            let value = expectOk result
+            Assert.Single value |> ignore
+            Assert.Equal("OrderPlaced", value.[0].Events.[0])
+        }
+
+    [<Fact>]
+    member this.``PlaceOrder fails when order already exists``() =
+        task {
+            let! aggregateId = this.PlaceOrderAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "PlaceOrder"
+                         Payload = json {| customerId = "cust-1"; items = [| "widget" |] |} } |]
+                )
+            Assert.Contains("already been placed", expectError result)
+        }
+
+    [<Fact>]
+    member this.``PlaceOrder fails with unknown customer``() =
+        task {
+            let! result =
+                this.ExecuteAsync(
+                    null,
+                    [| { Type = "PlaceOrder"
+                         Payload = json {| customerId = "cust-unknown"; items = [| "widget" |] |} } |]
+                )
+            Assert.Contains("does not exist", expectError result)
+        }
+
+    [<Fact>]
+    member this.``PlaceOrder fails with empty items``() =
+        task {
+            let! result =
+                this.ExecuteAsync(
+                    null,
+                    [| { Type = "PlaceOrder"
+                         Payload = json {| customerId = "cust-1"; items = [| |] |} } |]
+                )
+            Assert.Contains("at least one item", expectError result)
+        }
+
+    [<Fact>]
+    member this.``CancelOrder succeeds when order is placed``() =
+        task {
+            let! aggregateId = this.PlaceOrderAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "CancelOrder"
+                         Payload = json {| aggregateId = aggregateId; reason = "changed mind" |} } |]
+                )
+            let value = expectOk result
+            Assert.Single value |> ignore
+            Assert.Equal("OrderCancelled", value.[0].Events.[0])
+        }
+
+    [<Fact>]
+    member this.``CancelOrder fails when order does not exist``() =
+        task {
+            let aggregateId = Guid.NewGuid().ToString()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "CancelOrder"
+                         Payload = json {| aggregateId = aggregateId; reason = "changed mind" |} } |]
+                )
+            Assert.Contains("does not exist", expectError result)
+        }
+
+    [<Fact>]
+    member this.``CancelOrder fails when order is already cancelled``() =
+        task {
+            let! aggregateId = this.PlaceThenCancelAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "CancelOrder"
+                         Payload = json {| aggregateId = aggregateId; reason = "again" |} } |]
+                )
+            Assert.Contains("already been cancelled", expectError result)
+        }
+
+    [<Fact>]
+    member this.``CancelOrder fails when order is already shipped``() =
+        task {
+            let! aggregateId = this.PlaceThenShipAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "CancelOrder"
+                         Payload = json {| aggregateId = aggregateId; reason = "too late" |} } |]
+                )
+            Assert.Contains("cannot be cancelled", expectError result)
+        }
+
+    [<Fact>]
+    member this.``ShipOrder succeeds when order is placed``() =
+        task {
+            let! aggregateId = this.PlaceOrderAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "ShipOrder"
+                         Payload = json {| aggregateId = aggregateId; trackingNumber = "TRACK-123" |} } |]
+                )
+            let value = expectOk result
+            Assert.Single value |> ignore
+            Assert.Equal("OrderShipped", value.[0].Events.[0])
+        }
+
+    [<Fact>]
+    member this.``ShipOrder fails when order does not exist``() =
+        task {
+            let aggregateId = Guid.NewGuid().ToString()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "ShipOrder"
+                         Payload = json {| aggregateId = aggregateId; trackingNumber = "TRACK-123" |} } |]
+                )
+            Assert.Contains("does not exist", expectError result)
+        }
+
+    [<Fact>]
+    member this.``ShipOrder fails when order is cancelled``() =
+        task {
+            let! aggregateId = this.PlaceThenCancelAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "ShipOrder"
+                         Payload = json {| aggregateId = aggregateId; trackingNumber = "TRACK-123" |} } |]
+                )
+            Assert.Contains("cannot be shipped", expectError result)
+        }
+
+    [<Fact>]
+    member this.``ShipOrder fails when order is already shipped``() =
+        task {
+            let! aggregateId = this.PlaceThenShipAsync()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "ShipOrder"
+                         Payload = json {| aggregateId = aggregateId; trackingNumber = "TRACK-123" |} } |]
+                )
+            Assert.Contains("already been shipped", expectError result)
+        }
+
+// ── Order Reaction Tests ──────────────────────────────────────────────────────
+
+type OrderReactionTests() =
+
+    let db = TestDatabase()
+    let jsonOptions = JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase)
+
+    let handler =
+        AggregateHandler(
+            OrderAggregate.definition,
+            PostgresEventStore db.ConnectionString,
+            "orders",
+            EventProcessor OrderSummariesReactions.all
+        )
+
+    let startAppAsync () =
+        task {
+            let builder = WebApplication.CreateBuilder()
+            builder.WebHost.UseTestServer() |> ignore
+            let app = builder.Build()
+            app.MapAggregate("orders", handler, OrderAggregate.deserializeCommand, OrderAggregate.deserializeEvent) |> ignore
+            do! app.StartAsync()
+            return app
+        }
+
+    interface IAsyncLifetime with
+        member _.InitializeAsync() =
+            task {
+                use conn = new NpgsqlConnection(db.ConnectionString)
+                do! conn.OpenAsync()
+                do! conn.ExecuteAsync(
+                        """CREATE TABLE IF NOT EXISTS order_summaries (
+                               order_id    TEXT        PRIMARY KEY,
+                               customer_id TEXT        NOT NULL,
+                               status      TEXT        NOT NULL,
+                               items       JSONB       NOT NULL,
+                               placed_at   TIMESTAMPTZ NOT NULL,
+                               updated_at  TIMESTAMPTZ NOT NULL
+                           )"""
+                    ) |> Ignore
+            }
+
+        member _.DisposeAsync() = Task.CompletedTask
+
+    member private _.ExecuteAsync(aggregateId, commands) =
+        handler.ExecuteAsync(
+            { AggregateId = aggregateId; Commands = commands },
+            OrderAggregate.deserializeCommand,
+            OrderAggregate.deserializeEvent
+        )
+
+    member private this.PlaceOrderAsync() =
+        task {
+            let aggregateId = Guid.NewGuid().ToString()
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "PlaceOrder"
+                         Payload = json {| customerId = "cust-1"; items = [| "widget" |] |} } |]
+                )
+            expectOk result |> ignore
+            return aggregateId
+        }
+
+    member private _.GetOrderIdAsync(aggregateId: string) =
+        task {
+            let! app = startAppAsync()
+            let client = app.GetTestClient()
+            let! response = client.GetAsync($"/orders/{aggregateId}")
+            response.EnsureSuccessStatusCode() |> ignore
+            let! body = response.Content.ReadAsStringAsync()
+            let orderId = JsonSerializer.Deserialize<{| id: string |}>(body, jsonOptions).id
+            do! app.StopAsync()
+            return orderId
+        }
+
+    member private _.QueryStatusAsync(conn: NpgsqlConnection, orderId: string) =
+        conn.ExecuteScalarAsync<string>(
+            "SELECT status FROM order_summaries WHERE order_id = @orderId",
+            {| orderId = orderId |}
+        )
+
+    [<Fact>]
+    member this.``PlaceOrder creates order_summaries row with placed status``() =
+        task {
+            let! aggregateId = this.PlaceOrderAsync()
+            let! orderId = this.GetOrderIdAsync(aggregateId)
+
+            use conn = new NpgsqlConnection(db.ConnectionString)
+            do! conn.OpenAsync()
+            let! status = this.QueryStatusAsync(conn, orderId)
+            Assert.Equal("placed", status)
+        }
+
+    [<Fact>]
+    member this.``CancelOrder updates order_summaries status to cancelled``() =
+        task {
+            let! aggregateId = this.PlaceOrderAsync()
+            let! orderId = this.GetOrderIdAsync(aggregateId)
+
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "CancelOrder"
+                         Payload = json {| aggregateId = aggregateId; reason = "changed mind" |} } |]
+                )
+            expectOk result |> ignore
+
+            use conn = new NpgsqlConnection(db.ConnectionString)
+            do! conn.OpenAsync()
+            let! status = this.QueryStatusAsync(conn, orderId)
+            Assert.Equal("cancelled", status)
+        }
+
+    [<Fact>]
+    member this.``ShipOrder updates order_summaries status to shipped``() =
+        task {
+            let! aggregateId = this.PlaceOrderAsync()
+            let! orderId = this.GetOrderIdAsync(aggregateId)
+
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "ShipOrder"
+                         Payload = json {| aggregateId = aggregateId; trackingNumber = "TRACK-123" |} } |]
+                )
+            expectOk result |> ignore
+
+            use conn = new NpgsqlConnection(db.ConnectionString)
+            do! conn.OpenAsync()
+            let! status = this.QueryStatusAsync(conn, orderId)
+            Assert.Equal("shipped", status)
+        }
+
 // ── Read Model Tests ─────────────────────────────────────────────────────────
 
 type ReadModelTests() =

@@ -10,6 +10,12 @@ open FSCommandFramework.Core
 [<AutoOpen>]
 module WebApplicationExtensions =
 
+    let private jsonOptions = JsonSerializerOptions(JsonSerializerDefaults.Web)
+
+    let private writeJson (ctx: HttpContext) (value: obj) =
+        ctx.Response.ContentType <- "application/json; charset=utf-8"
+        ctx.Response.WriteAsync(JsonSerializer.Serialize(value, jsonOptions))
+
     type IEndpointRouteBuilder with
 
         member app.MapAggregate<'State, 'Event, 'Command>
@@ -33,9 +39,10 @@ module WebApplicationExtensions =
                                 let! result = handler.ExecuteAsync(batch, deserializeCommand, deserializeEvent)
 
                                 match result with
-                                | Ok value -> do! Results.Ok(value).ExecuteAsync ctx
+                                | Ok value -> do! writeJson ctx value
                                 | Error error ->
-                                    do! Results.UnprocessableEntity({ Error = error } :> obj).ExecuteAsync ctx
+                                    ctx.Response.StatusCode <- 422
+                                    do! writeJson ctx { Error = error }
                         with :? JsonException ->
                             ctx.Response.StatusCode <- 400
                     })
@@ -58,7 +65,7 @@ module WebApplicationExtensions =
                                     handler.Apply
 
                             match state with
-                            | Some s when not (isNull (box s)) -> do! Results.Ok(s).ExecuteAsync ctx
+                            | Some s when not (isNull (box s)) -> do! writeJson ctx s
                             | _ -> do! Results.NotFound().ExecuteAsync ctx
                     })
             )
