@@ -971,6 +971,26 @@ type OrderDispatchTests() =
             Assert.Contains("already been shipped", expectError result)
         }
 
+    [<Fact>]
+    member this.``PlaceOrder and ShipOrder in a single batch``() =
+        task {
+            let aggregateId = Guid.NewGuid().ToString()
+
+            let! result =
+                this.ExecuteAsync(
+                    aggregateId,
+                    [| { Type = "PlaceOrder"
+                         Payload = json {| customerId = "cust-1"; items = [| "widget" |] |} }
+                       { Type = "ShipOrder"
+                         Payload = json {| aggregateId = aggregateId; trackingNumber = "TRACK-123" |} } |]
+                )
+
+            let value = expectOk result
+            Assert.Equal(2, value.Length)
+            Assert.Equal("OrderPlaced", value.[0].Events.[0])
+            Assert.Equal("OrderShipped", value.[1].Events.[0])
+        }
+
 // ── Order Reaction Tests ──────────────────────────────────────────────────────
 
 type OrderReactionTests() =
