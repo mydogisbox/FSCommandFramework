@@ -74,7 +74,11 @@ type PostgresEventStore(connectionString: string) =
 
                         do! tx.CommitAsync()
                         return Ok(stored |> Seq.toList)
-                with ex ->
+                with
+                | :? PostgresException as pgEx when pgEx.SqlState = "23505" ->
+                    do! tx.RollbackAsync()
+                    return Error $"Concurrency conflict on stream '{streamId}': a concurrent write committed first."
+                | ex ->
                     do! tx.RollbackAsync()
                     return raise ex
             }

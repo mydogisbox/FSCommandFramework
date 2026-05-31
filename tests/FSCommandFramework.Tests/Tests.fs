@@ -36,27 +36,16 @@ open Helpers
 
 // ── Counter Tests ────────────────────────────────────────────────────────────
 
-[<Collection("Database")>]
 type CounterTests() =
 
     let db = TestDatabase()
 
-    let mutable handler: AggregateHandler<_,_,_> = Unchecked.defaultof<_>
-
-    interface IAsyncLifetime with
-        member _.InitializeAsync() =
-            task {
-                do! (db :> IAsyncLifetime).InitializeAsync()
-
-                handler <-
-                    AggregateHandler(
-                        CounterAggregate.definition,
-                        PostgresEventStore db.ConnectionString,
-                        "counters"
-                    )
-            }
-
-        member _.DisposeAsync() = task { () }
+    let handler =
+        AggregateHandler(
+            CounterAggregate.definition,
+            PostgresEventStore db.ConnectionString,
+            "counters"
+        )
 
     member private _.ExecuteAsync(aggregateId, commands) =
         handler.ExecuteAsync(
@@ -206,16 +195,9 @@ type CounterTests() =
 
 // ── EventProcessor Tests ─────────────────────────────────────────────────────
 
-[<Collection("Database")>]
 type EventProcessorTests() =
 
     let db = TestDatabase()
-
-    interface IAsyncLifetime with
-        member _.InitializeAsync() =
-            (db :> IAsyncLifetime).InitializeAsync()
-
-        member _.DisposeAsync() = task { () }
 
     [<Fact>]
     member _.``Sync reaction writes to outbox in same transaction``() =
@@ -339,15 +321,9 @@ type EventProcessorTests() =
 
 // ── Edge Case Tests ──────────────────────────────────────────────────────────
 
-[<Collection("Database")>]
 type EdgeCaseTests() =
 
     let db = TestDatabase()
-
-    interface IAsyncLifetime with
-        member _.InitializeAsync() = (db :> IAsyncLifetime).InitializeAsync()
-
-        member _.DisposeAsync() = task { () }
 
     [<Fact>]
     member _.``Reaction that throws rolls back events``() =
@@ -613,16 +589,9 @@ type EdgeCaseTests() =
 
 // ── HTTP Layer Tests ─────────────────────────────────────────────────────────
 
-[<Collection("Database")>]
 type HttpLayerTests() =
 
     let db = TestDatabase()
-
-    interface IAsyncLifetime with
-        member _.InitializeAsync() =
-            (db :> IAsyncLifetime).InitializeAsync()
-
-        member _.DisposeAsync() = task { () }
 
     [<Fact>]
     member _.``Malformed json body returns 400``() =
@@ -699,22 +668,102 @@ type HttpLayerTests() =
             do! app.StopAsync()
         }
 
+// ── Concurrency Tests ────────────────────────────────────────────────────────
+
+type ConcurrencyTests() =
+
+    let db = TestDatabase()
+
+    [<Fact>]
+    member _.``Concurrent writes to same aggregate via handler all succeed with retries``() =
+        task {
+            let aggregateId = Guid.NewGuid().ToString()
+
+            let handler =
+                AggregateHandler(
+                    CounterAggregate.definition,
+                    PostgresEventStore db.ConnectionString,
+                    "counters",
+                    maxRetries = 10
+                )
+
+            let tasks =
+                [ for _ in 1 .. 5 ->
+                    handler.ExecuteAsync(
+                        { AggregateId = aggregateId
+                          Commands = [| { Type = "Increment"; Payload = json {| by = 1 |} } |] },
+                        CounterAggregate.deserializeCommand,
+                        CounterAggregate.deserializeEvent
+                    ) ]
+
+            let! results = Task.WhenAll tasks
+            results |> Array.iter (expectOk >> ignore)
+
+            let store = PostgresEventStore db.ConnectionString :> IEventStore
+            let! stored = store.LoadAsync $"counters/{aggregateId}"
+            Assert.Equal(5, stored |> Seq.length)
+        }
+
+    [<Fact>]
+    member _.``Concurrent writes to same stream without retries exactly one succeeds``() =
+        task {
+            let aggregateId = Guid.NewGuid().ToString()
+
+            let handler =
+                AggregateHandler(
+                    CounterAggregate.definition,
+                    PostgresEventStore db.ConnectionString,
+                    "counters",
+                    maxRetries = 0
+                )
+
+            let tasks =
+                [ for _ in 1 .. 5 ->
+                    handler.ExecuteAsync(
+                        { AggregateId = aggregateId
+                          Commands = [| { Type = "Increment"; Payload = json {| by = 1 |} } |] },
+                        CounterAggregate.deserializeCommand,
+                        CounterAggregate.deserializeEvent
+                    ) ]
+
+            let! results = Task.WhenAll tasks
+            let successes = results |> Array.filter Result.isOk
+            let failures  = results |> Array.filter Result.isError
+
+            Assert.NotEmpty successes
+            Assert.NotEmpty failures
+            failures |> Array.iter (fun r -> Assert.Contains("Concurrency conflict", expectError r))
+
+            let store = PostgresEventStore db.ConnectionString :> IEventStore
+            let! stored = store.LoadAsync $"counters/{aggregateId}"
+            Assert.Equal(successes.Length, stored |> Seq.length)
+        }
+
+    [<Fact>]
+    member _.``Read immediately after write reflects appended events``() =
+        task {
+            let store = PostgresEventStore db.ConnectionString :> IEventStore
+            let streamId = $"counters/{Guid.NewGuid()}"
+
+            let! _ = store.AppendAsync(streamId, -1, [ ("CounterIncremented", """{"by":3}""") ], None, None)
+            let! stored = store.LoadAsync streamId
+
+            Assert.Single stored |> ignore
+            Assert.Equal("CounterIncremented", stored.[0].EventType)
+            Assert.Equal(0, stored.[0].Sequence)
+        }
+
 // ── Read Model Tests ─────────────────────────────────────────────────────────
 
-[<Collection("Database")>]
 type ReadModelTests() =
 
     let db = TestDatabase()
 
-    interface IAsyncLifetime with
-        member _.InitializeAsync() =
-            (db :> IAsyncLifetime).InitializeAsync()
-
-        member _.DisposeAsync() = task { () }
-
     [<Fact>]
     member _.``Concurrent commands each produce one read model entry``() =
         task {
+            let testId = Guid.NewGuid().ToString()
+
             let processor =
                 EventProcessor
                     [ EventReaction.on<CounterEvent> (fun e tx ->
@@ -725,7 +774,7 @@ type ReadModelTests() =
 
                                   do! npgsqlTx.Connection.ExecuteAsync(
                                           "INSERT INTO outbox (stream_id, event_type, payload, created_at) VALUES (@streamId, @eventType, @payload::jsonb, @createdAt)",
-                                          {| streamId = Guid.NewGuid().ToString()
+                                          {| streamId = $"{testId}/{Guid.NewGuid()}"
                                              eventType = "CounterIncremented"
                                              payload = $"""{{"by":{by}}}"""
                                              createdAt = DateTimeOffset.UtcNow |},
@@ -758,6 +807,8 @@ type ReadModelTests() =
 
             use conn = new NpgsqlConnection(db.ConnectionString)
             do! conn.OpenAsync()
-            let! entryCount = conn.ExecuteScalarAsync<int> "SELECT COUNT(*) FROM outbox"
+            let! entryCount = conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM outbox WHERE stream_id LIKE @prefix",
+                {| prefix = testId + "/%" |})
             Assert.Equal(20, entryCount)
         }

@@ -10,8 +10,11 @@ type AggregateHandler<'State, 'Event, 'Command>
         definition: AggregateDefinition<'State, 'Event, 'Command>,
         eventStore: IEventStore,
         aggregateName: string,
-        ?eventProcessor: EventProcessor
+        ?eventProcessor: EventProcessor,
+        ?maxRetries: int
     ) =
+
+    let maxRetries = defaultArg maxRetries 3
 
     static let jsonOptions =
         let opts =
@@ -51,62 +54,77 @@ type AggregateHandler<'State, 'Event, 'Command>
 
             let streamId = $"{aggregateName}/{aggregateId}"
 
-            let! stored = eventStore.LoadAsync streamId
+            let attempt () = task {
+                let! stored = eventStore.LoadAsync streamId
 
-            let currentSequence =
-                match stored with
-                | [] -> -1
-                | _ -> (List.last stored).Sequence
+                let currentSequence =
+                    match stored with
+                    | [] -> -1
+                    | _ -> (List.last stored).Sequence
 
-            let mutable state =
-                match stored with
-                | [] -> None
-                | _ ->
-                    Aggregate.fold
-                        (stored |> Seq.map (fun e -> deserializeEvent e.EventType e.Payload))
-                        definition.Apply
+                let mutable state =
+                    match stored with
+                    | [] -> None
+                    | _ ->
+                        Aggregate.fold
+                            (stored |> Seq.map (fun e -> deserializeEvent e.EventType e.Payload))
+                            definition.Apply
 
-            let results = ResizeArray<CommandSuccess>()
-            let pendingEvents = ResizeArray<string * string>()
-            let domainEvents = ResizeArray<obj>()
-            let mutable error: string option = None
+                let results = ResizeArray<CommandSuccess>()
+                let pendingEvents = ResizeArray<string * string>()
+                let domainEvents = ResizeArray<obj>()
+                let mutable error: string option = None
+                let mutable i = 0
 
-            let mutable i = 0
+                while i < batch.Commands.Length && error.IsNone do
+                    let envelope = batch.Commands.[i]
+                    let command = deserializeCommand envelope.Type envelope.Payload
 
-            while i < batch.Commands.Length && error.IsNone do
-                let envelope = batch.Commands.[i]
-                let command = deserializeCommand envelope.Type envelope.Payload
+                    match definition.Dispatch state command with
+                    | Error err -> error <- Some $"Command {i} ('{envelope.Type}') failed: {err}"
+                    | Ok events ->
+                        let serialized =
+                            events |> List.map AggregateHandler<'State, 'Event, 'Command>.SerializeEvent
 
-                match definition.Dispatch state command with
-                | Error err -> error <- Some $"Command {i} ('{envelope.Type}') failed: {err}"
-                | Ok events ->
-                    let serialized =
-                        events |> List.map AggregateHandler<'State, 'Event, 'Command>.SerializeEvent
+                        for e in events do
+                            state <- Some(definition.Apply state e)
+                            domainEvents.Add(box e)
 
-                    for e in events do
-                        state <- Some(definition.Apply state e)
-                        domainEvents.Add(box e)
+                        pendingEvents.AddRange serialized
 
-                    pendingEvents.AddRange serialized
+                        results.Add
+                            { Index = i
+                              AggregateId = aggregateId
+                              Events = serialized |> List.map fst }
 
-                    results.Add
-                        { Index = i
-                          AggregateId = aggregateId
-                          Events = serialized |> List.map fst }
+                    i <- i + 1
 
-                i <- i + 1
+                match error with
+                | Some err -> return Error err
+                | None ->
+                    let! appendResult =
+                        eventStore.AppendAsync(
+                            streamId,
+                            currentSequence,
+                            pendingEvents,
+                            eventProcessor,
+                            Some(domainEvents :> obj seq)
+                        )
 
-            match error with
-            | Some err -> return Error err
-            | None ->
-                let! appendResult =
-                    eventStore.AppendAsync(
-                        streamId,
-                        currentSequence,
-                        pendingEvents,
-                        eventProcessor,
-                        Some(domainEvents :> obj seq)
-                    )
+                    return appendResult |> Result.map (fun _ -> results |> Seq.toList)
+            }
 
-                return appendResult |> Result.map (fun _ -> results |> Seq.toList)
+            let! initial = attempt()
+            let mutable result: Result<CommandSuccess list, string> = initial
+            let mutable attempts = 1
+
+            while attempts <= maxRetries &&
+                  (match result with
+                   | Error msg -> msg.StartsWith "Concurrency conflict"
+                   | Ok _ -> false) do
+                let! r = attempt()
+                result <- r
+                attempts <- attempts + 1
+
+            return result
         }
