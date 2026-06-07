@@ -6,6 +6,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="PostgresEventStore.fs" />
+    <Compile Include="PostgresDcbEventStore.fs" />
+    <Compile Include="PostgresHelpers.fs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../FSCommandFramework.Core/FSCommandFramework.Core.fsproj" />

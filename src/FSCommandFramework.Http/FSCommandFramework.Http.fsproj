@@ -8,10 +8,12 @@
     <Compile Include="Dtos.fs" />
     <Compile Include="ReflectionDeserializer.fs" />
     <Compile Include="AggregateHandler.fs" />
+    <Compile Include="DcbAggregate.fs" />
     <Compile Include="WebApplicationExtensions.fs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="FSharp.SystemTextJson" Version="1.4.36" />
+    <PackageReference Include="FsToolkit.ErrorHandling" Version="5.2.0" />
     <ProjectReference Include="../FSCommandFramework.Core/FSCommandFramework.Core.fsproj" />
     <ProjectReference Include="../FSCommandFramework.Postgres/FSCommandFramework.Postgres.fsproj" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />

@@ -5,6 +5,24 @@ open System.Text.Json
 open System.Text.Json.Serialization
 open FSCommandFramework.Core
 
+module EventSerializer =
+
+    let private jsonOptions =
+        let opts =
+            JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true)
+        opts.Converters.Add(JsonFSharpConverter(JsonUnionEncoding.AdjacentTag ||| JsonUnionEncoding.NamedFields))
+        opts
+
+    let serialize (event: 'Event) : string * string =
+        let json = JsonSerializer.Serialize(event, jsonOptions)
+        use doc = JsonDocument.Parse json
+        let typeName = doc.RootElement.GetProperty("Case").GetString()
+        let payload =
+            match doc.RootElement.TryGetProperty "Fields" with
+            | true, fields -> fields.GetRawText()
+            | false, _     -> "{}"
+        typeName, payload
+
 type AggregateHandler<'State, 'Event, 'Command>
     (
         definition: AggregateDefinition<'State, 'Event, 'Command>,
@@ -16,28 +34,8 @@ type AggregateHandler<'State, 'Event, 'Command>
 
     let maxRetries = defaultArg maxRetries 3
 
-    static let jsonOptions =
-        let opts =
-            JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true)
-
-        opts.Converters.Add(JsonFSharpConverter(JsonUnionEncoding.AdjacentTag ||| JsonUnionEncoding.NamedFields))
-
-        opts
-
     member _.Apply = definition.Apply
     member _.EventStore = eventStore
-
-    static member private SerializeEvent(event: 'Event) : string * string =
-        let json = JsonSerializer.Serialize(event, jsonOptions)
-        use doc = JsonDocument.Parse json
-        let typeName = doc.RootElement.GetProperty("Case").GetString()
-
-        let payload =
-            match doc.RootElement.TryGetProperty "Fields" with
-            | true, fields -> fields.GetRawText()
-            | false, _ -> "{}"
-
-        typeName, payload
 
     member _.ExecuteAsync
         (
@@ -84,7 +82,7 @@ type AggregateHandler<'State, 'Event, 'Command>
                     | Error err -> error <- Some $"Command {i} ('{envelope.Type}') failed: {err}"
                     | Ok events ->
                         let serialized =
-                            events |> List.map AggregateHandler<'State, 'Event, 'Command>.SerializeEvent
+                            events |> List.map EventSerializer.serialize
 
                         for e in events do
                             state <- Some(definition.Apply state e)

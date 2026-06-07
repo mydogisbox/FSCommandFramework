@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <Authors>Michael Ciccotti</Authors>
+    <Version>1.1.10</Version>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+</Project>
